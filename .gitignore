@@ -21,7 +21,6 @@ user_data/logs/*.log.*
 user_data/backtest_results/*.zip
 user_data/backtest_results/*.meta.json
 user_data/backtest_results/*.json
-!user_data/backtest_results/.last_result.json
 
 # OHLCV / signal data — large, regenerable binaries. Never track these.
 *.feather
