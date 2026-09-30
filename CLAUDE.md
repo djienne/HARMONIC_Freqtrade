@@ -18,9 +18,10 @@ Workspace rules in ../AGENTS.md also apply.
 
 DATA_MANAGER.py owns the detector and live custom signal files in
 user_data/data/binance/futures_custom_data. The producer runs --loop; the trader
-runs --validate-only before starting. Do not run another writing data-manager
-against the active directory. Standalone user_data/validate_data.py is optional,
-not the compose preflight entrypoint.
+runs --validate-only before starting as a diagnostic only: it must never block the
+trader from starting, or open trades lose stop-loss handling. Do not run another
+writing data-manager against the active directory. Standalone
+user_data/validate_data.py is optional, not the compose preflight entrypoint.
 
 Downloaded candles remain in memory until signals are computed. Publishing the
 feather and metadata uses separate atomic replacements; readers may briefly hold

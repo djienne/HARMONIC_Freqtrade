@@ -17,9 +17,10 @@ Two services share `user_data`:
 - `data-manager` downloads closed candles, repairs the last 12 candles, computes
   signals over the full history, and publishes the feather plus parameter/version
   metadata. It never publishes an unfinished download on the signal path.
-- `freqtrade` validates the prepared files before starting and reads them during
-  trading. Missing, invalid or stale signals block entries **and signal exits**.
-  A missing candle is not a flat signal. Stop-loss handling remains active.
+- `freqtrade` logs a validation report of the prepared files, then starts and
+  reads them during trading. Missing, invalid or stale signals block entries
+  **and signal exits**. A missing candle is not a flat signal. Stop-loss handling
+  remains active because the trader starts even when validation fails.
 
 The trader polls every five seconds and can retry the same candle after the
 producer finishes. Validated files are cached by file revision; age is checked
@@ -37,8 +38,9 @@ docker compose up -d --build
 docker compose logs --tail 50 freqtrade data-manager
 ```
 
-Initial history acquisition takes time. The trader restarts until prepared
-signals pass validation. Existing algorithm caches are invalidated by the
+Initial history acquisition takes time. Until prepared signals pass validation
+the trader runs but holds: no entries and no signal exits, stop-loss still
+active. Existing algorithm caches are invalidated by the
 versioned fingerprint and recomputed by the producer. Never delete the trade
 database to update code or regenerate signals.
 

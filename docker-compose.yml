@@ -35,10 +35,12 @@ services:
         limits:
           cpus: '0.1'
           memory: '1536M'
-    # Validate prepared custom signals before starting trading.
+    # Log a validation report, then always start trading. Never gate the start on
+    # it: a trader that is not running checks no stop-loss for open trades, and
+    # the strategy already holds (no entries, no signal exits) on bad signals.
     entrypoint: [ "/bin/sh", "-c" ]
     command:
-      - "python /freqtrade/user_data/strategies/DATA_MANAGER.py --validate-only --max-age-minutes 15 && freqtrade trade --logfile /freqtrade/user_data/logs/freqtrade.log --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite --config /freqtrade/user_data/config.json --strategy HARMONIC"
+      - "python /freqtrade/user_data/strategies/DATA_MANAGER.py --validate-only --max-age-minutes 15; freqtrade trade --logfile /freqtrade/user_data/logs/freqtrade.log --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite --config /freqtrade/user_data/config.json --strategy HARMONIC"
 
   data-manager:
     image: ft-harmonic:2025.10
