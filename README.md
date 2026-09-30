@@ -67,6 +67,15 @@ Hyperopt must use `--analyze-per-epoch` when optimizing `sigma`, `err_thresh` or
 `kept_patterns`. The documented command in `commands.txt` includes it. It must
 not modify the producer's signal files while evaluating parameters.
 
+Both `freqtrade hyperopt` and `freqtrade hyperopt-show` overwrite
+`user_data/strategies/HARMONIC.json` unless given `--disable-param-export`; the
+commands in `commands.txt` include it. Both containers read that file at start,
+so an unintended export changes live parameters (including `LEV`) at the next
+restart, and a restart of only one service leaves the trader holding on a
+fingerprint mismatch. Adopting parameters is a deliberate step: run
+`hyperopt-show -n <epoch>` without the flag, review `HARMONIC.json`, then restart
+both services together.
+
 The tests check prefix causality, invariance to price units, flat/empty limits,
 missing-candle recovery, parameter changes, cache expiry, download failures,
 and invalid OHLCV rejection. A passing test is not evidence of profitability.
