@@ -395,9 +395,9 @@ class DataManager:
         if drop_unclosed and not df.empty:
             timeframe = timeframe or self.timeframe
             timeframe_ms = self._parse_timeframe_to_ms(timeframe)
-            cutoff_ms = self._closed_candle_cutoff_ms()
-            date_ms = df['date'].astype('int64') // 1_000_000
-            closed_mask = (date_ms + timeframe_ms - 1) <= cutoff_ms
+            # Timestamp arithmetic, not int64 casts: date resolution may be ns, us or ms.
+            cutoff = pd.Timestamp(self._closed_candle_cutoff_ms(), unit='ms', tz='UTC')
+            closed_mask = df['date'] + pd.Timedelta(milliseconds=timeframe_ms - 1) <= cutoff
             dropped = int((~closed_mask).sum())
             if dropped:
                 logger.info(f"Dropped {dropped} incomplete cached candle(s).")

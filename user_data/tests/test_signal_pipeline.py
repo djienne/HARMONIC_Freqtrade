@@ -124,6 +124,13 @@ class SignalPipelineTests(unittest.TestCase):
                 fatal, _, _, _ = self.manager._validate_signal_dataframe(PAIR, data, meta, *PARAMS, None)
                 self.assertTrue(fatal)
 
+    def test_forming_candle_dropped_at_any_date_resolution(self):
+        # pandas 3 (and ms feathers) give non-ns dates; closure must not assume ns.
+        now = pd.Timestamp.now(tz='UTC').floor('5min')
+        data = candles().iloc[:2].copy()
+        data['date'] = pd.Series([now - pd.Timedelta(minutes=10), now]).astype('datetime64[ms, UTC]')
+        self.assertEqual(len(self.manager._normalize_ohlcv(data)), 1)
+
     def test_old_algorithm_cache_and_large_nan_tail_rejected(self):
         data = pd.concat([candles()] * 10, ignore_index=True).assign(signal=0)
         data['date'] = pd.date_range('2026-01-01', periods=len(data), freq='5min', tz='UTC')
