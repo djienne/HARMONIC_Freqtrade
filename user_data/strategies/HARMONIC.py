@@ -92,12 +92,21 @@ class HARMONIC(IStrategy):
             self._signal_cache = {}
         cached = self._signal_cache.get(pair)
         if cached is None or cached[0] != revision:
-            data, _ = data_manager.load_precomputed_signals(
-                pair, *params, max_age_minutes=self.SIGNAL_MAX_AGE_MINUTES
-            )
+            try:
+                data, _ = data_manager.load_precomputed_signals(
+                    pair, *params, max_age_minutes=self.SIGNAL_MAX_AGE_MINUTES
+                )
+            except Exception as e:
+                # Cache failures too: unchanged bad files are not re-validated
+                # every loop, which would delay stop-loss checks at 0.1 CPU.
+                self._signal_cache[pair] = (revision, e)
+                raise
             self._signal_cache[pair] = (revision, data)
         else:
             data = cached[1]
+            if isinstance(data, Exception):
+                # Fresh traceback: re-raising the same instance would grow it forever.
+                raise data.with_traceback(None)
         age = pd.Timestamp.now(tz='UTC') - (data['date'].iloc[-1] + pd.Timedelta(self.timeframe))
         return data, pd.Timedelta(seconds=1) <= age <= pd.Timedelta(minutes=self.SIGNAL_MAX_AGE_MINUTES)
 

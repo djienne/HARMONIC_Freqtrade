@@ -196,6 +196,17 @@ class SignalPipelineTests(unittest.TestCase):
             meta_path.write_text('changed')
             self.strategy._load_signals(PAIR)
             self.assertEqual(load.call_count, 2)
+        # Failures are cached too: unchanged bad files are not re-validated every loop.
+        with patch.object(self.manager, 'load_precomputed_signals', side_effect=ValueError('bad')) as load:
+            meta_path.write_text('broken')
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, 'bad'):
+                    self.strategy._load_signals(PAIR)
+            self.assertEqual(load.call_count, 1)
+            meta_path.write_text('broken again')
+            with self.assertRaises(ValueError):
+                self.strategy._load_signals(PAIR)
+            self.assertEqual(load.call_count, 2)
 
     def test_persistence_failure_is_not_reported_as_success(self):
         data = candles()
