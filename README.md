@@ -84,8 +84,9 @@ fingerprint mismatch. Adopting parameters is a deliberate step: run
 both services together.
 
 The tests check prefix causality, invariance to price units, flat/empty limits,
-missing-candle recovery, parameter changes, cache expiry, download failures,
-and invalid OHLCV rejection. A passing test is not evidence of profitability.
+missing-candle recovery, parameter changes, cache expiry and cached failures,
+download failures, tail repair, run-mode routing, date resolution and invalid
+OHLCV rejection. A passing test is not evidence of profitability.
 Native backtests with only five-minute candles do not resolve intrabar order
 execution; use finer detail candles and out-of-sample periods for performance
 research, including fees, funding, slippage and parameter sensitivity.
@@ -103,6 +104,24 @@ qualification.
 reliable performance evidence.** The old matcher required a future confirmed
 extreme before evaluating the final leg, so historical entries could be absent
 in real time. Retained Git history/results are archival, not a benchmark to match.
+
+**Parameter provenance.** `HARMONIC.json` (sigma 0.035, err_thresh 0.16,
+kept_patterns 1011000, LEV 5) was exported by hyperopt on 2025-03-10, so it was
+selected with the pre-fix, look-ahead matcher. `research/param_sensitivity.py`
+re-runs the causal detector over a sigma × err_thresh grid on the producer's
+candles. On Binance 5m archives from 2020-01 to 2026-08 (both pairs; crude
+next-open trade walk, price-level returns, 0.1% fee per side) it gave:
+
+| sigma, err_thresh | before 2025-03-10 | after 2025-03-10 |
+|---|---|---|
+| 0.030, 0.16 | 102 trades, +0.77%, 76% wins | 19 trades, −0.06%, 42% wins |
+| 0.035, 0.16 (live) | 89 trades, +1.14%, 82% wins | 19 trades, +1.04%, 74% wins |
+| 0.040, 0.16 | 65 trades, +0.46%, 65% wins | 10 trades, +1.25%, 80% wins |
+
+The live point is an in-sample peak. Nineteen later trades cannot confirm it,
+and lowering sigma by 0.005 removes the later edge. No trade reached the
+stop-loss in these 6.7 years, so the data say nothing about the leverage tail.
+Treat the parameters as unvalidated; changing them is an explicit decision.
 
 ## Intentional risk settings
 

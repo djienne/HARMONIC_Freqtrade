@@ -47,7 +47,8 @@ resetting a detector on a fixed warmup slice erased historical boundary signals.
 Version the signal fingerprint when calculation semantics change.
 
 Tests and native backtests use Docker. The test commands are in README.md.
-research/ scripts are historical prototypes and are not production imports.
+research/ holds historical prototypes and analysis scripts; production never
+imports them.
 
 CPU ceilings and exchange rate limits belong to the workspace's central tools.
 Do not hand-edit either policy here. No new dependency is needed for the signal

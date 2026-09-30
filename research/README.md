@@ -14,4 +14,10 @@ These files are kept for reference only and intentionally diverge from productio
 - `directional_change.py` — standalone NumPy version of the zig-zag detector with
   a matplotlib `__main__` demo.
 
+Current analysis tool (imports the production detector; never imported by it):
+
+- `param_sensitivity.py` — runs the production detector over a sigma × err_thresh
+  grid on the producer's custom candles (read-only) and summarises a crude trade
+  walk before/after a split date. Run command and limits are in its docstring.
+
 Do not import from here in the strategy or data manager.
