@@ -1,0 +1,7 @@
+freqtrade backtesting --strategy HARMONIC --config ./user_data/config.json --timeframe 5m --timerange 20170101-
+
+freqtrade hyperopt-show --best -n -1
+
+freqtrade download-data --timeframe 5m --timerange 20170101- --config ./user_data/config.json
+
+freqtrade hyperopt --strategy HARMONIC --timeframe 5m --config ./user_data/config.json --analyze-per-epoch --hyperopt-loss MultiMetricHyperOptLoss --timerange 20170101- --min-trades 80 --spaces buy -j 4 -e 5000

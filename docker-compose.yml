@@ -1,0 +1,70 @@
+services:
+  freqtrade:
+    image: ft-harmonic:2025.10
+    # image: freqtradeorg/freqtrade:develop
+    # Use plotting image
+    # image: freqtradeorg/freqtrade:develop_plot
+    # Build step - only needed when additional dependencies are needed
+    build:
+      context: .
+      dockerfile: "./Dockerfile.technical"
+    restart: unless-stopped
+    container_name: HARMONIC
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    # Cap numpy/BLAS + PyArrow thread pools (sized to nproc=10 inside the
+    # container despite the 0.1 CPU limit) and glibc malloc arenas. The harmonic
+    # compute is a sequential Python loop, not BLAS-bound, so this cuts RSS
+    # ~2-3x with no perf cost. See plan: reduce-container-memory.
+    environment:
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - MALLOC_ARENA_MAX=2
+      - MALLOC_TRIM_THRESHOLD_=100000
+    # Expose api on port 8080 (localhost only)
+    # Please read the https://www.freqtrade.io/en/stable/rest-api/ documentation
+    # before enabling this.
+    ports:
+      - "127.0.0.1:3009:8080"
+    depends_on:
+      - data-manager
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: '1536M'
+    # Validate prepared custom signals before starting trading.
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - "python /freqtrade/user_data/strategies/DATA_MANAGER.py --validate-only --max-age-minutes 15 && freqtrade trade --logfile /freqtrade/user_data/logs/freqtrade.log --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite --config /freqtrade/user_data/config.json --strategy HARMONIC"
+
+  data-manager:
+    image: ft-harmonic:2025.10
+    # image: freqtradeorg/freqtrade:develop
+    # Use plotting image
+    # image: freqtradeorg/freqtrade:develop_plot
+    build:
+      context: .
+      dockerfile: "./Dockerfile.technical"
+    restart: unless-stopped
+    container_name: HARMONIC_DATA_MANAGER
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    # See freqtrade service above: cap thread pools + glibc arenas to cut RSS.
+    environment:
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - MALLOC_ARENA_MAX=2
+      - MALLOC_TRIM_THRESHOLD_=100000
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: '1536M'
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - "python /freqtrade/user_data/strategies/DATA_MANAGER.py --loop --max-age-minutes 15 --log-file /freqtrade/user_data/logs/data-manager.log"

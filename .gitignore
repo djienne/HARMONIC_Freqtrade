@@ -1,0 +1,55 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Freqtrade runtime logs
+user_data/logs/*.log
+user_data/logs/*.log.*
+
+# SQLite trade databases + WAL/shared-memory sidecars (runtime state, not source)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Backtest / hyperopt artifacts (regenerable)
+user_data/backtest_results/*.zip
+user_data/backtest_results/*.meta.json
+user_data/backtest_results/*.json
+!user_data/backtest_results/.last_result.json
+
+# OHLCV / signal data — large, regenerable binaries. Never track these.
+*.feather
+user_data/data/
+user_data/plot/
+
+# Hyperopt state
+user_data/hyperopt_results/
+user_data/hyperopts/__pycache__/
+
+# Manual scratch / backups
+*.manual_backup
+*.bak
+*.orig
+*.tmp
+user_data/config_backup.json
+DOC_FREQTRADE.txt
+
+# Agent / editor local state
+.claude/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Secrets — the real .env must never be committed.
+.env
+.env.*
+
+# ...but the placeholder template must stay tracked.
+!.env.example
