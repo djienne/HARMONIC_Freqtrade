@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 
 import pandas as pd
 
-from freqtrade.enums import RunMode
+from freqtrade.enums import TRADE_MODES, RunMode
 from freqtrade.strategy import CategoricalParameter, DecimalParameter, IStrategy, IntParameter
 
 # Import DataManager + the precomputed-signal plumbing.
@@ -127,9 +127,11 @@ class HARMONIC(IStrategy):
         runmode = getattr(getattr(self, 'dp', None), 'runmode', None)
         if runmode == RunMode.HYPEROPT and not self.config.get('analyze_per_epoch', False):
             raise ValueError('HARMONIC hyperopt requires --analyze-per-epoch for signal parameters')
-        if runmode in (RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT):
-            # Offline data errors must fail the experiment, not score a silent
-            # zero-trade strategy as if computation had succeeded.
+        if runmode not in TRADE_MODES:
+            # Only live/dry-run read the producer's files. Every other mode
+            # (backtest, hyperopt, plot, lookahead/recursive analysis) runs the
+            # detector in memory. Offline data errors must fail the experiment,
+            # not score a silent zero-trade strategy as if computation had succeeded.
             return self._offline_signals(data_ft, pair)
 
         # `data_ok` gates BOTH entries and exits. When it is False the bot holds

@@ -54,7 +54,14 @@ writer against the same custom data directory.
 docker compose run --rm --no-deps --entrypoint python freqtrade -B -m unittest discover -s user_data/tests -v
 docker compose run --rm --no-deps --entrypoint python freqtrade -B user_data/tests/test_validator_write_window.py
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade backtesting --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20251127 --cache none
+docker compose run --rm --no-deps --entrypoint freqtrade freqtrade lookahead-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20240101-20251127
+docker compose run --rm --no-deps --entrypoint freqtrade freqtrade recursive-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20250401
 ```
+
+Only live and dry-run read the producer's signal files. Every other run mode,
+including Freqtrade's `lookahead-analysis` and `recursive-analysis`, runs the
+detector in memory, so those tools test the detector itself. Lookahead analysis
+needs at least 10 trades (`--minimum-trade-amount`), hence its longer range.
 
 Backtesting requires Freqtrade's native OHLCV, mark and funding data. Its strategy
 path recomputes signals in memory for the selected parameters. Custom candles

@@ -33,6 +33,7 @@ class SignalPipelineTests(unittest.TestCase):
     def setUp(self):
         self.manager = dm.DataManager()
         self.strategy = strategy_module.HARMONIC({})
+        self.strategy.dp = SimpleNamespace(runmode=RunMode.DRY_RUN)
         self.strategy.sigma.value, self.strategy.err_thresh.value, self.strategy.kept_patterns.value = PARAMS
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -102,6 +103,12 @@ class SignalPipelineTests(unittest.TestCase):
         self.strategy.kept_patterns.value = '0111000'  # exclude Gartley
         different = self.strategy.populate_indicators(data.iloc[:6], {'pair': PAIR})
         self.assertFalse(different.signal.any())
+        # lookahead-/recursive-analysis run as UTIL_NO_EXCHANGE: they must test
+        # the detector, not read the producer's files.
+        self.strategy.kept_patterns.value = '1011000'
+        self.strategy.dp = SimpleNamespace(runmode=RunMode.UTIL_NO_EXCHANGE)
+        analysed = self.strategy.populate_indicators(data.iloc[:6], {'pair': PAIR})
+        np.testing.assert_array_equal(analysed.signal, expected)
 
     def test_invalid_ohlcv_rejected_in_shared_paths(self):
         for col, value in [('close', -1.), ('high', np.inf), ('high', 1.), ('volume', -1.)]:
