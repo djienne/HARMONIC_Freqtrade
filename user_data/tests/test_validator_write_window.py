@@ -97,7 +97,7 @@ def main():
     mid.loc[mid.index[50], "signal"] = np.nan
     results.append(run(mgr, "NaN mid-series (corruption)", mid, meta_for(mgr, frame()), True))
 
-    # 4. corruption: meta BEHIND the data (never a legitimate window)
+    # 4. meta BEHIND the data by less than the tolerance: the persist gap, tolerated
     behind = frame(n=210)  # lag 10 <= tolerance -> treated as the persist gap
     results.append(run(mgr, "meta behind by 10 (within tolerance)", behind, meta_for(mgr, frame(200)), False))
 

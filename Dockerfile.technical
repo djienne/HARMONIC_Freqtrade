@@ -1,3 +1,5 @@
 FROM freqtradeorg/freqtrade:2025.10
 
-RUN pip3 install ta tqdm scipy plotly yfinance statsmodels
+# scipy: research prototype; plotly: analysis notebook. The signal pipeline
+# needs nothing beyond the Freqtrade image.
+RUN pip3 install scipy plotly

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Union, Optional, List, Tuple
 from math import log
 import logging
+import logging.handlers
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -597,7 +598,7 @@ class DataManager:
             logger.error(f"Failed to save feather file: {e}")
             raise
 
-    def download_data(self, pair, timeframe, start_date_str='2020-01-01T00:00:00Z', persist=True):
+    def download_data(self, pair, timeframe, start_date_str='2020-01-01T00:00:00Z', persist=False):
         filepath = self._get_feather_path(pair, timeframe)
 
         since = self._get_start_timestamp(start_date_str)
@@ -733,7 +734,7 @@ class DataManager:
 
         return final_data
 
-    def ensure_data_up_to_date(self, pair, persist=True):
+    def ensure_data_up_to_date(self, pair, persist=False):
         filepath = self._get_feather_path(pair, self.timeframe)
 
         needs_update = False
@@ -1353,10 +1354,6 @@ class DataManager:
 
         return df
 
-    def update_all(self):
-        for pair in self.pairs:
-            self.download_data(pair, self.timeframe)
-
     def update_all_with_signals(self, sigma, err_thresh, kept_patterns_map, force_full_recompute=False):
         all_ok = True
         for pair in self.pairs:
@@ -1474,7 +1471,8 @@ def _setup_logging(log_file=None):
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
+        handlers.append(logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'))
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1510,6 +1508,11 @@ def main():
             kept_patterns,
             max_age_minutes=args.max_age_minutes,
         ) else 1
+
+    # Single writer from here on: temp files left by a killed write are stale.
+    for tmp_path in Path(dm.data_dir).glob('.*.tmp.*'):
+        logger.info(f"Removing stale temp file {tmp_path}")
+        dm._cleanup_temp_path(tmp_path)
 
     if args.loop:
         dm.run_loop_with_signals(
