@@ -142,6 +142,29 @@ class SignalPipelineTests(unittest.TestCase):
             failed = self.manager.download_data(PAIR, '5m', persist=False)
         pd.testing.assert_frame_equal(failed, data)
 
+    def test_tail_repair_replaces_tail_without_copying_history(self):
+        # Large enough that an unstable sort can reorder duplicate dates.
+        n = 3000
+        close = 100 + np.sin(np.arange(n) / 50.)
+        data = pd.DataFrame({
+            'date': pd.date_range('2026-01-01', periods=n, freq='5min', tz='UTC'),
+            'open': close, 'high': close, 'low': close, 'close': close, 'volume': 1., 'signal': 0,
+        })
+        path = self.manager._get_feather_path(PAIR, '5m')
+        data.to_feather(path)
+        ms = lambda ts: int(ts.timestamp() * 1000)
+        revised = [[ms(d), *[str(c * 1.01)] * 4, '1', ms(d) + 299999]
+                   for d, c in zip(data.date.iloc[-12:], data.close.iloc[-12:])]
+        t = ms(data.date.iloc[-1] + pd.Timedelta(minutes=5))
+        revised.append([t, '100', '100', '100', '100', '1', t + 299999])
+        with patch.object(self.manager, '_fetch_klines_chunk', side_effect=[revised, []]), \
+                patch.object(dm.time, 'sleep'), \
+                patch.object(self.manager, '_normalize_ohlcv', wraps=self.manager._normalize_ohlcv) as norm:
+            out = self.manager.download_data(PAIR, '5m', persist=False)
+        self.assertEqual(len(out), n + 1)
+        np.testing.assert_allclose(out.close.iloc[-13:-1], data.close.iloc[-12:] * 1.01)
+        self.assertLessEqual(max(len(c.args[0]) for c in norm.call_args_list), n + 13)
+
     def test_cache_rechecks_freshness_and_file_revision(self):
         data = candles().assign(signal=1)
         data['date'] = pd.date_range(

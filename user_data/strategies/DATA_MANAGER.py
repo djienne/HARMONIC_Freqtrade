@@ -389,7 +389,8 @@ class DataManager:
         errors = self._ohlcv_errors(df)
         if errors:
             raise ValueError('; '.join(errors))
-        df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
+        # Stable sort: for a duplicate date the later row (a fresh download) wins.
+        df = df.sort_values('date', kind='stable').drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
 
         if drop_unclosed and not df.empty:
             timeframe = timeframe or self.timeframe
@@ -601,6 +602,7 @@ class DataManager:
 
         since = self._get_start_timestamp(start_date_str)
         current_data = None
+        prefix_len = 0
 
         existing_data = None
         if os.path.exists(filepath):
@@ -615,6 +617,7 @@ class DataManager:
                     repair_start_ts = existing_data['date'].iloc[repair_start]
                     since = int(repair_start_ts.timestamp() * 1000)
                     current_data = existing_data.iloc[:repair_start].copy()
+                    prefix_len = repair_start
                     if current_data.empty:
                         current_data = None
                     logger.info(
@@ -695,10 +698,12 @@ class DataManager:
         if not persist:
             # Publish only once signals are ready. A failed repair must not
             # discard the old tail or pass a partial download as a new snapshot.
+            # Append only the downloaded rows: they replace old tail rows of the
+            # same date (stable sort, keep='last') without copying the history.
             if current_data is None:
                 current_data = existing_data
             elif existing_data is not None:
-                current_data = pd.concat([existing_data, current_data], ignore_index=True)
+                current_data = pd.concat([existing_data, current_data.iloc[prefix_len:]], ignore_index=True)
             return self._normalize_ohlcv(current_data, timeframe)
 
         if os.path.exists(filepath):
