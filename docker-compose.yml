@@ -1,5 +1,8 @@
 services:
   freqtrade:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     image: ft-harmonic:2025.10
     # image: freqtradeorg/freqtrade:develop
     # Use plotting image
@@ -43,6 +46,9 @@ services:
       - "python /freqtrade/user_data/strategies/DATA_MANAGER.py --validate-only --max-age-minutes 15; freqtrade trade --logfile /freqtrade/user_data/logs/freqtrade.log --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite --config /freqtrade/user_data/config.json --strategy HARMONIC"
 
   data-manager:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     image: ft-harmonic:2025.10
     # image: freqtradeorg/freqtrade:develop
     # Use plotting image
