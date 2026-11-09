@@ -23,10 +23,11 @@ trader from starting, or open trades lose stop-loss handling. Do not run another
 writing data-manager against the active directory. Standalone
 user_data/validate_data.py is optional, not the compose preflight entrypoint.
 
-Downloaded candles remain in memory until signals are computed. Publishing the
-feather and metadata uses separate atomic replacements; readers may briefly hold
-until both match. The validator retains bounded tolerance for legacy checkpoint
-windows, but missing per-candle signals must never become actionable exits.
+Downloaded candles remain in memory until signals are computed. The feather and
+its metadata (Arrow schema key harmonic_signal_meta) are published in one atomic
+replace, so there is no write window to tolerate: any metadata mismatch or missing
+signal makes the file invalid, and missing per-candle signals must never become
+actionable exits.
 
 The trader retries the same candle because external signals arrive later than
 Freqtrade's candles. Cache unchanged files, but check age on every call. A valid

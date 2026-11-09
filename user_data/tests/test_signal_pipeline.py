@@ -143,6 +143,28 @@ class SignalPipelineTests(unittest.TestCase):
         data.loc[20:, 'signal'] = np.nan
         self.assertTrue(self.manager._validate_signal_dataframe(PAIR, data, meta, *PARAMS, None)[0])
 
+    def test_metadata_must_describe_the_rows_held(self):
+        # Data and metadata are one atomic file, so any disagreement is corruption.
+        data = candles().assign(signal=0)
+        data.loc[3, 'signal'] = 1
+        build = lambda d: self.manager._build_signal_metadata(
+            PAIR, d, self.manager._fingerprint(*PARAMS), *PARAMS, 'full')
+        fatal = lambda d, meta: self.manager._validate_signal_dataframe(PAIR, d, meta, *PARAMS, None)[0]
+        self.assertFalse(fatal(data, build(data)))
+        wrong_sigma = dict(build(data), sigma=.99)
+        nan_tail = data.assign(signal=[0, 0, 0, 1, 0, 0, 0, np.nan])
+        nan_mid = data.assign(signal=[0, 0, np.nan, 1, 0, 0, 0, 0])
+        for label, d, meta in [
+            ('no metadata', data, None),
+            ('one row behind', data, build(data.iloc[:-1])),
+            ('one row ahead', data.iloc[:-1], build(data)),
+            ('missing last signal', nan_tail, build(data)),
+            ('missing middle signal', nan_mid, build(data)),
+            ('wrong parameters', data, wrong_sigma),
+        ]:
+            with self.subTest(label):
+                self.assertTrue(fatal(d, meta))
+
     def test_downloading_does_not_publish_unsigned_tail_or_lose_old_data(self):
         data = candles().assign(signal=1)
         path = self.manager._get_feather_path(PAIR, '5m')
@@ -151,11 +173,11 @@ class SignalPipelineTests(unittest.TestCase):
         kline = [t, '111', '111', '111', '111', '1', t + 299999]
         with patch.object(self.manager, '_fetch_klines_chunk', side_effect=[[kline], []]), \
                 patch.object(dm.time, 'sleep'):
-            downloaded = self.manager.download_data(PAIR, '5m', persist=False)
+            downloaded = self.manager.download_data(PAIR, '5m')
         self.assertEqual(len(downloaded), len(data) + 1)
         pd.testing.assert_frame_equal(pd.read_feather(path), data)
         with patch.object(self.manager, '_fetch_klines_chunk', return_value=None):
-            failed = self.manager.download_data(PAIR, '5m', persist=False)
+            failed = self.manager.download_data(PAIR, '5m')
         pd.testing.assert_frame_equal(failed, data)
 
     def test_tail_repair_replaces_tail_without_copying_history(self):
@@ -176,7 +198,7 @@ class SignalPipelineTests(unittest.TestCase):
         with patch.object(self.manager, '_fetch_klines_chunk', side_effect=[revised, []]), \
                 patch.object(dm.time, 'sleep'), \
                 patch.object(self.manager, '_normalize_ohlcv', wraps=self.manager._normalize_ohlcv) as norm:
-            out = self.manager.download_data(PAIR, '5m', persist=False)
+            out = self.manager.download_data(PAIR, '5m')
         self.assertEqual(len(out), n + 1)
         np.testing.assert_allclose(out.close.iloc[-13:-1], data.close.iloc[-12:] * 1.01)
         self.assertLessEqual(max(len(c.args[0]) for c in norm.call_args_list), n + 13)
@@ -188,25 +210,23 @@ class SignalPipelineTests(unittest.TestCase):
             periods=len(data), freq='5min')
         path = Path(self.manager._get_feather_path(PAIR, '5m'))
         path.touch()
-        meta_path = Path(self.manager._meta_path(str(path)))
-        meta_path.touch()
         with patch.object(self.manager, 'load_precomputed_signals', return_value=(data, True)) as load:
             self.assertTrue(self.strategy._load_signals(PAIR)[1])
             # The cache holds its own (tail) copy; age that copy.
             self.strategy._signal_cache[PAIR][1]['date'] -= pd.Timedelta(hours=1)
             self.assertFalse(self.strategy._load_signals(PAIR)[1])
             self.assertEqual(load.call_count, 1)
-            meta_path.write_text('changed')
+            path.write_text('changed')
             self.strategy._load_signals(PAIR)
             self.assertEqual(load.call_count, 2)
         # Failures are cached too: unchanged bad files are not re-validated every loop.
         with patch.object(self.manager, 'load_precomputed_signals', side_effect=ValueError('bad')) as load:
-            meta_path.write_text('broken')
+            path.write_text('broken')
             for _ in range(2):
                 with self.assertRaisesRegex(ValueError, 'bad'):
                     self.strategy._load_signals(PAIR)
             self.assertEqual(load.call_count, 1)
-            meta_path.write_text('broken again')
+            path.write_text('broken again')
             with self.assertRaises(ValueError):
                 self.strategy._load_signals(PAIR)
             self.assertEqual(load.call_count, 2)
@@ -218,8 +238,12 @@ class SignalPipelineTests(unittest.TestCase):
         data['date'] = pd.date_range(
             end=pd.Timestamp.now(tz='UTC').floor('5min') - pd.Timedelta(minutes=10),
             periods=len(data), freq='5min')
-        data.to_feather(self.manager._get_feather_path(PAIR, '5m'))
+        path = self.manager._get_feather_path(PAIR, '5m')
+        data.to_feather(path)
         self.manager.ensure_data_and_signals_up_to_date(PAIR, *PARAMS, update_ohlcv=False)
+        self.assertEqual([p.name for p in Path(self.tmp.name).iterdir()], [Path(path).name])
+        ok, fresh, messages, _ = self.manager.validate_signal_file(PAIR, *PARAMS)
+        self.assertEqual((ok, fresh, messages), (True, True, []))
         out = self.strategy.populate_indicators(data, {'pair': PAIR})
         out = self.strategy.populate_exit_trend(self.strategy.populate_entry_trend(out, {}), {})
         self.assertTrue(out.data_ok.iloc[-1])

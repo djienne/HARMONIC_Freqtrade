@@ -15,12 +15,21 @@ profitable market mechanism.
 Two services share `user_data`:
 
 - `data-manager` downloads closed candles, repairs the last 12 candles, computes
-  signals over the full history, and publishes the feather plus parameter/version
-  metadata. It never publishes an unfinished download on the signal path.
+  signals over the full history, and publishes ONE feather whose Arrow schema
+  carries the parameter/version metadata, so data and metadata change in a single
+  atomic replace. It never publishes an unfinished download on the signal path.
 - `freqtrade` logs a validation report of the prepared files, then starts and
   reads them during trading. Missing, invalid or stale signals block entries
   **and signal exits**. A missing candle is not a flat signal. Stop-loss handling
   remains active because the trader starts even when validation fails.
+
+Connection loss and restarts: the producer retries downloads with backoff, never
+touches the signal file while offline, and after any gap re-downloads from the
+last 12 stored candles to now, which reproduces identical signals (tested with a
+350-candle gap). The trader holds (stop-loss active) while signals are stale and
+exits at startup if Binance is unreachable, so the compose restart policy retries
+it about once a minute. Docker Desktop must itself be running: it starts at
+Windows login, and a PC reboot recovered by itself in under 10 minutes.
 
 The trader polls every five seconds and can retry the same candle after the
 producer finishes. Validated files are cached by file revision; age is checked
@@ -59,7 +68,6 @@ writer against the same custom data directory.
 
 ```sh
 docker compose run --rm --no-deps --entrypoint python freqtrade -B -m unittest discover -s user_data/tests -v
-docker compose run --rm --no-deps --entrypoint python freqtrade -B user_data/tests/test_validator_write_window.py
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade backtesting --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20251127 --cache none
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade lookahead-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20240101-20251127
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade recursive-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20250401

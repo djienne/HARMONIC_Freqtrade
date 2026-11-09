@@ -94,8 +94,8 @@ class HARMONIC(IStrategy):
         """Cache validated live files by revision, but reassess age on every call."""
         params = (self.sigma.value, self.err_thresh.value, self.kept_patterns.value)
         path = Path(data_manager._get_feather_path(pair, self.timeframe))
-        paths = (path, Path(data_manager._meta_path(str(path))))
-        revision = tuple((p.stat().st_mtime_ns, p.stat().st_size) for p in paths) + params
+        stat = path.stat()  # one file holds data and metadata
+        revision = ((stat.st_mtime_ns, stat.st_size),) + params
         if not hasattr(self, '_signal_cache'):
             self._signal_cache = {}
         cached = self._signal_cache.get(pair)

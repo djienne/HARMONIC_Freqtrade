@@ -3,6 +3,8 @@ import math
 import requests
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.feather as pf
 import os
 import json
 import time
@@ -278,10 +280,9 @@ class DataManager:
     SIGNAL_VERSION = 3
 
     TAIL_REPAIR_CANDLES = 12
-    # How far the sidecar meta may legitimately differ from the feather while
-    # a persist cycle is mid-flight. One repair window plus slack; anything
-    # larger is not a write gap and is treated as corruption.
-    META_LAG_TOLERANCE_ROWS = 16
+    # Signal metadata travels inside the feather (Arrow schema metadata), so one
+    # atomic file replace publishes data and metadata together: no write window.
+    META_KEY = b'harmonic_signal_meta'
     CLOSED_CANDLE_SAFETY_MS = 1000
     FULL_RECOMPUTE_INTERVAL_SECONDS = 24 * 60 * 60
     LOOP_CLOSE_BUFFER_SECONDS = 10
@@ -493,38 +494,35 @@ class DataManager:
         except Exception as e:
             logger.warning(f"Could not remove temp file {path}: {e}")
 
-    def _atomic_write_feather(self, df, filepath, label):
-        """
-        Write a feather file without exposing partial files to readers.
+    def _read_signal_file(self, filepath):
+        """Return (dataframe, metadata or None) from ONE read, so they cannot disagree."""
+        table = pf.read_table(filepath)
+        raw = (table.schema.metadata or {}).get(self.META_KEY)
+        return table.to_pandas(), (json.loads(raw) if raw else None)
 
-        The temp file is created in the target directory so os.replace can
-        atomically swap it into place after validation.
+    def _atomic_write_feather(self, df, filepath, label, meta):
+        """
+        Publish `df` and its metadata as ONE atomic file replace.
+
+        The temp file is created in the target directory, read back and checked,
+        then swapped into place with os.replace, so readers see either the old
+        file or the complete new one.
         """
         target = Path(filepath)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._temp_path_for(target)
 
         try:
-            df.to_feather(tmp_path)
-            pd.read_feather(tmp_path)
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            table = table.replace_schema_metadata(
+                {**(table.schema.metadata or {}), self.META_KEY: json.dumps(meta).encode()}
+            )
+            pf.write_feather(table, tmp_path)
+            written, written_meta = self._read_signal_file(tmp_path)
+            if len(written) != len(df) or written_meta != meta:
+                raise RuntimeError(f"written file does not match data: rows={len(written)}, expected={len(df)}")
             os.replace(tmp_path, target)
             logger.info(f"{label}: Saved {len(df)} rows to {target}")
-        except Exception:
-            self._cleanup_temp_path(tmp_path)
-            raise
-
-    def _atomic_write_json(self, payload, filepath):
-        target = Path(filepath)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._temp_path_for(target)
-
-        try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(payload, f, indent=2)
-                f.write('\n')
-            with open(tmp_path, 'r', encoding='utf-8') as f:
-                json.load(f)
-            os.replace(tmp_path, target)
         except Exception:
             self._cleanup_temp_path(tmp_path)
             raise
@@ -574,31 +572,7 @@ class DataManager:
             logger.error(f"Error reading {filepath} while {context}: {e}")
             raise
 
-    def _save_data(self, df, filepath):
-        """
-        Write dataframe to feather with integrity checks. Preserves any 'signal'
-        column already present in df; callers are responsible for making sure
-        signals are aligned to date.
-        """
-        if df.empty:
-            return
-
-        df = self._normalize_ohlcv(df, self.timeframe, drop_unclosed=True)
-
-        if df.empty:
-            return
-
-        if not df['date'].is_monotonic_increasing:
-            logger.error("Data is NOT monotonic after sorting! Logic error.")
-            df = df.sort_values('date').reset_index(drop=True)
-
-        try:
-            self._atomic_write_feather(df, filepath, "Checkpoint")
-        except Exception as e:
-            logger.error(f"Failed to save feather file: {e}")
-            raise
-
-    def download_data(self, pair, timeframe, start_date_str='2020-01-01T00:00:00Z', persist=False):
+    def download_data(self, pair, timeframe, start_date_str='2020-01-01T00:00:00Z'):
         filepath = self._get_feather_path(pair, timeframe)
 
         since = self._get_start_timestamp(start_date_str)
@@ -677,8 +651,6 @@ class DataManager:
                 else:
                     current_data = new_data
 
-                if persist:
-                    self._save_data(current_data, filepath)
                 ohlcv_buffer = []
 
             time.sleep(0.2)
@@ -693,48 +665,18 @@ class DataManager:
             else:
                 current_data = new_data
 
-            if persist:
-                self._save_data(current_data, filepath)
+        # Nothing is written here: the caller publishes only once signals are
+        # ready, so a failed repair cannot discard the old tail or pass a partial
+        # download as a new snapshot. Append only the downloaded rows: they
+        # replace old tail rows of the same date (stable sort, keep='last')
+        # without copying the history.
+        if current_data is None:
+            current_data = existing_data
+        elif existing_data is not None:
+            current_data = pd.concat([existing_data, current_data.iloc[prefix_len:]], ignore_index=True)
+        return self._normalize_ohlcv(current_data, timeframe)
 
-        if not persist:
-            # Publish only once signals are ready. A failed repair must not
-            # discard the old tail or pass a partial download as a new snapshot.
-            # Append only the downloaded rows: they replace old tail rows of the
-            # same date (stable sort, keep='last') without copying the history.
-            if current_data is None:
-                current_data = existing_data
-            elif existing_data is not None:
-                current_data = pd.concat([existing_data, current_data.iloc[prefix_len:]], ignore_index=True)
-            return self._normalize_ohlcv(current_data, timeframe)
-
-        if os.path.exists(filepath):
-            try:
-                final_data = self._read_feather(
-                    filepath, f"verifying downloaded data for {pair}", quarantine_on_error=True
-                )
-            except Exception:
-                final_data = pd.DataFrame()
-        else:
-            final_data = pd.DataFrame()
-
-        if len(final_data) > 1:
-            time_diffs = final_data['date'].diff().dropna()
-            expected_diff = self._parse_timeframe_to_ms(timeframe)
-            if pd.api.types.is_timedelta64_dtype(time_diffs):
-                time_diffs_ms = time_diffs.dt.total_seconds() * 1000
-            else:
-                time_diffs_ms = time_diffs
-
-            gaps = time_diffs_ms[time_diffs_ms > (expected_diff * 1.5)]
-
-            if not gaps.empty:
-                logger.warning(f"Found {len(gaps)} gaps in data for {pair}. First gap at index {gaps.index[0]} of size {gaps.iloc[0]}ms.")
-            else:
-                logger.info(f"Data continuity verified for {pair}. No significant gaps found.")
-
-        return final_data
-
-    def ensure_data_up_to_date(self, pair, persist=False):
+    def ensure_data_up_to_date(self, pair):
         filepath = self._get_feather_path(pair, self.timeframe)
 
         needs_update = False
@@ -745,10 +687,7 @@ class DataManager:
                 df = self._read_feather(
                     filepath, f"checking freshness for {pair}", quarantine_on_error=True
                 )
-                raw_len = len(df)
                 df = self._normalize_ohlcv(df, self.timeframe, drop_unclosed=True)
-                if len(df) != raw_len and persist:
-                    self._save_data(df, filepath)
                 if df.empty:
                     needs_update = True
                 else:
@@ -763,27 +702,22 @@ class DataManager:
 
         if needs_update:
             logger.info(f"Data for {pair} needs update.")
-            return self.download_data(pair, self.timeframe, persist=persist)
+            return self.download_data(pair, self.timeframe)
 
         return df
 
     # ---------- signal-related helpers ----------
 
-    def _meta_path(self, feather_path):
-        return feather_path + '.signal_meta.json'
-
     def _fingerprint(self, sigma, err_thresh, kept_patterns_map):
         raw = f"{self.SIGNAL_VERSION}|{float(sigma):.8f}|{float(err_thresh):.8f}|{kept_patterns_map}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    def _read_signal_meta(self, meta_path):
-        if not os.path.exists(meta_path):
-            return None
+    def _read_signal_meta(self, filepath):
+        """Metadata only (file footer, milliseconds); None if absent or unreadable."""
         try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not read signal meta {meta_path}: {e}")
+            raw = (pa.ipc.open_file(filepath).schema.metadata or {}).get(self.META_KEY)
+            return json.loads(raw) if raw else None
+        except Exception:
             return None
 
     def _as_utc_timestamp(self, value):
@@ -941,41 +875,10 @@ class DataManager:
 
         signal_numeric = pd.to_numeric(df['signal'], errors='coerce')
 
-        # The feather has two writers. `_save_data` ("Checkpoint") appends newly
-        # downloaded candles and only *preserves* an existing signal column, so
-        # those rows carry NaN until `persist_signals` recomputes and rewrites,
-        # then updates the meta. A reader landing in that window sees trailing
-        # NaN signals AND a row_count one ahead of the meta. Treating either as
-        # fatal makes the strategy refuse the file and hold - which is why this
-        # bot never opened a single trade.
-        #
-        # A NaN block at the very END is that known window: drop it and use the
-        # last fully-signalled history. Truncating to the last signalled row is
-        # exactly the state the meta describes, so the row_count and
-        # latest_candle checks below then line up. NaN anywhere else is real
-        # corruption and stays fatal.
-        dropped_trailing = 0
-        na_signal = signal_numeric.isna()
-        if na_signal.any():
-            valid_positions = (~na_signal).to_numpy().nonzero()[0]
-            trailing_only = (
-                len(valid_positions) > 0
-                and bool(na_signal.to_numpy()[valid_positions[-1] + 1:].all())
-            )
-            # `keep < len(df)` matters: with NaN only in the middle the trailing
-            # slice is empty and .all() is vacuously True, so without this guard
-            # a corrupt file would log a misleading "dropped 0 trailing".
-            keep = valid_positions[-1] + 1 if len(valid_positions) else 0
-            if trailing_only and keep < len(df):
-                dropped_trailing = len(df) - keep
-                soft.append(
-                    f"dropped {dropped_trailing} trailing candle(s) awaiting signal computation"
-                )
-                df = df.iloc[:keep].copy()
-                signal_numeric = signal_numeric.iloc[:keep]
-                na_signal = na_signal.iloc[:keep]
-
-        if na_signal.any():
+        # Data and metadata are published in one atomic file replace, so there is
+        # no half-written state to tolerate: a missing signal anywhere is
+        # corruption, and a missing signal must never become an actionable exit.
+        if signal_numeric.isna().any():
             fatal.append("signal column contains invalid values")
         else:
             signal_int = signal_numeric.astype(int)
@@ -985,9 +888,6 @@ class DataManager:
             if invalid_signals:
                 fatal.append(f"signal column contains values outside [-1, 0, 1]: {sorted(invalid_signals)}")
             df['signal'] = signal_int
-
-        if dropped_trailing > self.META_LAG_TOLERANCE_ROWS:
-            fatal.append('unfinished signal tail exceeds the write-window tolerance')
 
         if df['date'].duplicated().any():
             fatal.append("date column contains duplicate candles")
@@ -1053,89 +953,26 @@ class DataManager:
             fatal.append("metadata signal parameters are invalid")
         if meta.get('kept_patterns_map') != kept_patterns_map:
             fatal.append("metadata kept_patterns_map mismatch")
-        # A persist cycle updates the feather and its meta as two separate
-        # atomic writes, so a reader can land between them in EITHER direction:
-        #
-        #   meta AHEAD  - checkpoint blanked the tail (TAIL_REPAIR_CANDLES rows
-        #                 re-downloaded without signals) and we truncated above,
-        #                 so the meta still describes the larger prior state.
-        #   meta BEHIND - signals were just persisted to the feather and the
-        #                 meta write has not landed yet (the verify re-read of
-        #                 ~700k rows sits between them).
-        #
-        # Both are brief and benign. The bound keeps that narrow: a lag larger
-        # than one repair window is not a write gap and stays fatal, as does any
-        # mismatch when the data itself is suspect. The parameter checks above
-        # (fingerprint/sigma/err_thresh/kept_patterns) remain the real guard
-        # against trading on the wrong signals.
-        meta_rows = int(meta.get('row_count', -1))
-        meta_lag = len(df) - meta_rows
-        in_write_window = (
-            (0 < dropped_trailing <= self.META_LAG_TOLERANCE_ROWS
-             and -self.META_LAG_TOLERANCE_ROWS <= meta_lag <= 0)
-            or (not dropped_trailing and 0 < meta_lag <= self.META_LAG_TOLERANCE_ROWS)
-        )
-        if meta_rows != len(df):
-            if in_write_window:
-                direction = "ahead of" if meta_lag < 0 else "behind"
-                soft.append(
-                    f"metadata row_count {meta_rows} is {direction} the {len(df)} row(s) "
-                    "held; a persist cycle is mid-flight"
-                )
-            else:
-                fatal.append(
-                    f"metadata row_count mismatch: expected {len(df)}, got {meta_rows}")
+        # The metadata describes exactly the rows written with it. Any
+        # disagreement means a corrupt or foreign file, never a write in flight.
+        if meta.get('row_count') != len(df):
+            fatal.append(f"metadata row_count mismatch: expected {len(df)}, got {meta.get('row_count')}")
 
         latest_candle = self._format_utc_timestamp(df['date'].iloc[-1]) if not df.empty else None
         if not self._timestamps_match(meta.get('latest_candle'), latest_candle):
-            if in_write_window:
-                soft.append(
-                    f"metadata latest_candle {meta.get('latest_candle')} differs from "
-                    f"{latest_candle}; persist cycle mid-flight"
-                )
-            else:
-                fatal.append(
-                    f"metadata latest_candle mismatch: expected {latest_candle}, got {meta.get('latest_candle')}"
-                )
+            fatal.append(
+                f"metadata latest_candle mismatch: expected {latest_candle}, got {meta.get('latest_candle')}"
+            )
 
-        # Same write-window reasoning as the row_count/latest_candle checks: with
-        # trailing rows dropped, every derived aggregate is computed over a
-        # PREFIX of what the meta describes. A prefix can only have counts <=
-        # the meta's, so that is tolerable; anything else is genuine corruption.
         actual_counts = self._signal_counts(df)
         meta_counts = {str(k): int(v) for k, v in (meta.get('signal_counts') or {}).items()}
         if meta_counts != actual_counts:
-            # One side must be a prefix of the other, and which side depends on
-            # the lag direction: with meta ahead our counts are the smaller
-            # subset; with meta behind, theirs are. Counts moving the *wrong*
-            # way for the observed lag means the two files disagree about
-            # history, not about recency, so that stays fatal.
-            keys = set(actual_counts) | set(meta_counts)
-            if meta_lag < 0:
-                consistent = all(actual_counts.get(k, 0) <= meta_counts.get(k, 0) for k in keys)
-            else:
-                consistent = all(meta_counts.get(k, 0) <= actual_counts.get(k, 0) for k in keys)
-            if in_write_window and consistent:
-                soft.append(
-                    "metadata signal_counts cover a different candle span than the "
-                    "rows held; persist cycle mid-flight"
-                )
-            else:
-                fatal.append(
-                    f"metadata signal_counts mismatch: expected {actual_counts}, got {meta_counts}")
+            fatal.append(f"metadata signal_counts mismatch: expected {actual_counts}, got {meta_counts}")
 
-        latest_long = self._latest_signal_timestamp(df, 1)
-        latest_nonzero = self._latest_signal_timestamp(df, None)
-        if not self._timestamps_match(meta.get('latest_long_signal'), latest_long):
-            if in_write_window:
-                soft.append("metadata latest_long_signal differs; persist cycle mid-flight")
-            else:
-                fatal.append("metadata latest_long_signal mismatch")
-        if not self._timestamps_match(meta.get('latest_nonzero_signal'), latest_nonzero):
-            if in_write_window:
-                soft.append("metadata latest_nonzero_signal differs; persist cycle mid-flight")
-            else:
-                fatal.append("metadata latest_nonzero_signal mismatch")
+        if not self._timestamps_match(meta.get('latest_long_signal'), self._latest_signal_timestamp(df, 1)):
+            fatal.append("metadata latest_long_signal mismatch")
+        if not self._timestamps_match(meta.get('latest_nonzero_signal'), self._latest_signal_timestamp(df, None)):
+            fatal.append("metadata latest_nonzero_signal mismatch")
 
         if self._as_utc_timestamp(meta.get('last_update_at')) is None:
             fatal.append("metadata last_update_at is missing or invalid")
@@ -1151,7 +988,6 @@ class DataManager:
         err_thresh,
         kept_patterns_map,
         max_age_minutes: Optional[float] = DEFAULT_MAX_AGE_MINUTES,
-        quarantine_on_error: bool = False,
     ) -> Tuple[bool, bool, List[str], pd.DataFrame]:
         """
         Returns (structurally_ok, fresh, messages, df).
@@ -1162,21 +998,15 @@ class DataManager:
         affect structurally_ok.
         """
         filepath = self._get_feather_path(pair, self.timeframe)
-        meta_path = self._meta_path(filepath)
 
         if not os.path.exists(filepath):
             return False, False, [f"custom signal file not found: {filepath}"], pd.DataFrame()
 
         try:
-            df = self._read_feather(
-                filepath,
-                f"validating signal data for {pair}",
-                quarantine_on_error=quarantine_on_error,
-            )
+            df, meta = self._read_signal_file(filepath)
         except Exception as e:
             return False, False, [f"could not read custom signal file: {e}"], pd.DataFrame()
 
-        meta = self._read_signal_meta(meta_path)
         fatal, soft, fresh_msgs, normalized_df = self._validate_signal_dataframe(
             pair,
             df,
@@ -1213,7 +1043,6 @@ class DataManager:
             err_thresh,
             kept_patterns_map,
             max_age_minutes=max_age_minutes,
-            quarantine_on_error=False,
         )
         if not structurally_ok:
             raise ValueError("; ".join(messages))
@@ -1259,10 +1088,9 @@ class DataManager:
         - `force_full_recompute=True`: ignore reusable cached signals.
         """
         filepath = self._get_feather_path(pair, self.timeframe)
-        meta_path = self._meta_path(filepath)
 
         if update_ohlcv:
-            df = self.ensure_data_up_to_date(pair, persist=False)
+            df = self.ensure_data_up_to_date(pair)
         else:
             if not os.path.exists(filepath):
                 logger.error(f"No feather found for {pair} at {filepath} (update_ohlcv=False).")
@@ -1285,7 +1113,7 @@ class DataManager:
 
         fingerprint = self._fingerprint(sigma, err_thresh, kept_patterns_map)
         row_count = len(df)
-        cached_meta = self._read_signal_meta(meta_path)
+        cached_meta = self._read_signal_meta(filepath)
         force_full = force_full_recompute or self._full_recompute_due(cached_meta)
 
         has_signal_column = 'signal' in df.columns
@@ -1300,7 +1128,6 @@ class DataManager:
                 err_thresh,
                 kept_patterns_map,
                 max_age_minutes=self.DEFAULT_MAX_AGE_MINUTES if update_ohlcv else None,
-                quarantine_on_error=False,
             )
             if structurally_ok and fresh:
                 return validated_df
@@ -1323,12 +1150,6 @@ class DataManager:
         df['signal'] = new_sig
 
         if persist_signals:
-            try:
-                self._atomic_write_feather(df, filepath, f"Persisted signals for {pair}")
-            except Exception as e:
-                logger.error(f"Failed to persist signals for {pair}: {e}")
-                raise
-
             meta_payload = self._build_signal_metadata(
                 pair,
                 df,
@@ -1340,16 +1161,9 @@ class DataManager:
                 previous_meta=cached_meta,
             )
             try:
-                written_df = self._read_feather(filepath, f"verifying persisted signals for {pair}")
-                written_df = self._normalize_ohlcv(written_df, self.timeframe, drop_unclosed=False)
-                if len(written_df) != row_count:
-                    raise RuntimeError(f"row count changed after write: expected={row_count}, got={len(written_df)}")
-                if self._format_utc_timestamp(written_df['date'].iloc[-1]) != meta_payload['latest_candle']:
-                    raise RuntimeError("latest candle changed after write")
-                self._atomic_write_json(meta_payload, meta_path)
-                logger.info(f"Persisted signal meta for {pair} to {meta_path}")
+                self._atomic_write_feather(df, filepath, f"Persisted signals for {pair}", meta_payload)
             except Exception as e:
-                logger.error(f"Persisted signals for {pair}, but failed to persist signal meta: {e}")
+                logger.error(f"Failed to persist signals for {pair}: {e}")
                 raise
 
         return df
@@ -1384,7 +1198,6 @@ class DataManager:
                 err_thresh,
                 kept_patterns_map,
                 max_age_minutes=max_age_minutes,
-                quarantine_on_error=False,
             )
             if structurally_ok and fresh:
                 latest_candle = self._format_utc_timestamp(df['date'].iloc[-1]) if not df.empty else None
