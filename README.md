@@ -26,6 +26,13 @@ The trader polls every five seconds and can retry the same candle after the
 producer finishes. Validated files are cached by file revision; age is checked
 on every use. The API is bound to `127.0.0.1:3009`.
 
+Memory: the trader validates the full file but caches only the newest 5,000
+`date`/`signal` rows, and both services use Arrow's system allocator. Before
+this (November 2026) the trader grew to 1.2 GB RAM + 1 GB swap: a pandas `.dt`
+reference cycle pinned two full-history columns per reload until a rare full
+GC. Check with `docker stats --no-stream HARMONIC` (swap shows in
+`docker exec HARMONIC cat /sys/fs/cgroup/memory.swap.current`).
+
 Full signal computation replaces the old approximate tail computation: resetting
 the detector on a slice changed historical signals at the slice boundary. If
 full computation no longer fits a five-minute cycle, preserve exact detector
@@ -57,6 +64,15 @@ docker compose run --rm --no-deps --entrypoint freqtrade freqtrade backtesting -
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade lookahead-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20240101-20251127
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade recursive-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20250401
 ```
+
+`research/replay_live_entry.py` replays the latest real long starts on the
+producer's candles through the real producer → file → dry-run strategy path and
+fails unless each becomes `enter_long` on the newest candle (mount `research/`
+as in `param_sensitivity.py`). On 2026-11-09 all six recent starts passed. A
+throwaway dry-run copy (fresh database, separate port) force-entered BTC: a 5x
+long with a stake of about 500 filled at once, and the live exit signal closed
+it 41 s later (`exit_signal`). The production database had never held a trade
+because the pre-fix pipeline published each long one candle after its start.
 
 Only live and dry-run read the producer's signal files. Every other run mode,
 including Freqtrade's `lookahead-analysis` and `recursive-analysis`, runs the

@@ -32,10 +32,13 @@ def _merge_precomputed_signals(data_ft: pd.DataFrame, data: pd.DataFrame, pair: 
     if 'date' not in data.columns or 'signal' not in data.columns:
         raise ValueError(f"Precomputed data for {pair} missing 'date' or 'signal' column")
 
-    if data['date'].dt.tz is None:
+    # Check the dtype, not `.dt`: pandas caches the `.dt` accessor on the Series
+    # in a reference cycle, which pinned two full-history arrays per reload until
+    # a rare full GC (trader grew to 2.2 GB incl. swap).
+    if getattr(data['date'].dtype, 'tz', None) is None:
         logger.warning(f"Custom data for {pair} is timezone-naive. Assuming UTC.")
         data = data.copy()
-        data['date'] = data['date'].dt.tz_localize('UTC')
+        data['date'] = pd.to_datetime(data['date'], utc=True)
 
     # Slice before joining: live calls need only the trader's recent candles.
     signals = data.loc[data['date'].between(data_ft['date'].min(), data_ft['date'].max()), ['date', 'signal']]
@@ -74,6 +77,11 @@ class HARMONIC(IStrategy):
     process_only_new_candles: bool = False
     can_short: bool = False
     SIGNAL_MAX_AGE_MINUTES = 15
+    # The trader caches only this many newest (date, signal) rows; the whole
+    # file is still validated on each reload. Ceiling: must exceed the live
+    # dataframe (1,500 candles on Binance futures). Older candles would merely
+    # get data_ok=False, and only the newest candle drives entries and exits.
+    SIGNAL_TAIL_ROWS = 5000
 
     # Hyperopt parameters. This strategy is intentionally long-only in live
     # trading; bearish harmonic signals are used as exits, not short entries.
@@ -101,6 +109,7 @@ class HARMONIC(IStrategy):
                 # every loop, which would delay stop-loss checks at 0.1 CPU.
                 self._signal_cache[pair] = (revision, e)
                 raise
+            data = data.iloc[-self.SIGNAL_TAIL_ROWS:][['date', 'signal']].reset_index(drop=True)
             self._signal_cache[pair] = (revision, data)
         else:
             data = cached[1]

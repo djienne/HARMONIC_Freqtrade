@@ -26,6 +26,9 @@ services:
       - NUMEXPR_NUM_THREADS=1
       - MALLOC_ARENA_MAX=2
       - MALLOC_TRIM_THRESHOLD_=100000
+      # Arrow's mimalloc pool retained freed feather-read buffers; glibc returns
+      # them at once (measured 227 MB flat vs. growth to >1 GB over 60 reloads).
+      - ARROW_DEFAULT_MEMORY_POOL=system
     # Expose api on port 8080 (localhost only)
     # Please read the https://www.freqtrade.io/en/stable/rest-api/ documentation
     # before enabling this.
@@ -68,6 +71,7 @@ services:
       - NUMEXPR_NUM_THREADS=1
       - MALLOC_ARENA_MAX=2
       - MALLOC_TRIM_THRESHOLD_=100000
+      - ARROW_DEFAULT_MEMORY_POOL=system
     deploy:
       resources:
         limits:

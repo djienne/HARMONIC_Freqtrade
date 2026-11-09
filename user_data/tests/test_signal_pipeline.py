@@ -1,8 +1,10 @@
 """Small science/production checks: run with python -B -m unittest discover -s user_data/tests."""
+import gc
 import logging
 import sys
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -190,7 +192,8 @@ class SignalPipelineTests(unittest.TestCase):
         meta_path.touch()
         with patch.object(self.manager, 'load_precomputed_signals', return_value=(data, True)) as load:
             self.assertTrue(self.strategy._load_signals(PAIR)[1])
-            data['date'] -= pd.Timedelta(hours=1)
+            # The cache holds its own (tail) copy; age that copy.
+            self.strategy._signal_cache[PAIR][1]['date'] -= pd.Timedelta(hours=1)
             self.assertFalse(self.strategy._load_signals(PAIR)[1])
             self.assertEqual(load.call_count, 1)
             meta_path.write_text('changed')
@@ -207,6 +210,34 @@ class SignalPipelineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.strategy._load_signals(PAIR)
             self.assertEqual(load.call_count, 2)
+
+    def test_published_long_enters_and_cached_history_is_freed(self):
+        # Producer -> files -> trader with nothing patched in between: a long on
+        # the newest closed candle must become enter_long on that same candle.
+        data = candles().iloc[:6].copy()
+        data['date'] = pd.date_range(
+            end=pd.Timestamp.now(tz='UTC').floor('5min') - pd.Timedelta(minutes=10),
+            periods=len(data), freq='5min')
+        data.to_feather(self.manager._get_feather_path(PAIR, '5m'))
+        self.manager.ensure_data_and_signals_up_to_date(PAIR, *PARAMS, update_ohlcv=False)
+        out = self.strategy.populate_indicators(data, {'pair': PAIR})
+        out = self.strategy.populate_exit_trend(self.strategy.populate_entry_trend(out, {}), {})
+        self.assertTrue(out.data_ok.iloc[-1])
+        self.assertEqual(out.enter_long.iloc[-1], 1)
+        self.assertEqual(out.exit_long.iloc[-1], 0)
+        cached = self.strategy._signal_cache[PAIR][1]
+        self.assertEqual(list(cached.columns), ['date', 'signal'])
+        # A replaced cache entry must be freed by reference counting alone; the
+        # long-lived trader rarely runs a full GC (a `.dt` cycle leaked ~11 MiB
+        # per reload).
+        date_ref = weakref.ref(cached['date'])
+        del cached, out
+        gc.disable()
+        try:
+            self.strategy._signal_cache.clear()
+            self.assertIsNone(date_ref())
+        finally:
+            gc.enable()
 
     def test_persistence_failure_is_not_reported_as_success(self):
         data = candles()
