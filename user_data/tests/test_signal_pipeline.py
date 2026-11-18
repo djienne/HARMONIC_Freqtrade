@@ -40,6 +40,7 @@ class SignalPipelineTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.manager.data_dir = self.tmp.name
+        self.strategy.ledger_path = Path(self.tmp.name) / 'live_decisions.csv'
         # HARMONIC can import the module under its package name; replace only
         # this instance to keep tests independent of production files.
         self.manager_patch = patch.object(strategy_module, 'data_manager', self.manager)
@@ -111,6 +112,61 @@ class SignalPipelineTests(unittest.TestCase):
         self.strategy.dp = SimpleNamespace(runmode=RunMode.UTIL_NO_EXCHANGE)
         analysed = self.strategy.populate_indicators(data.iloc[:6], {'pair': PAIR})
         np.testing.assert_array_equal(analysed.signal, expected)
+
+    def test_backtest_detector_starts_at_live_origin(self):
+        # Native candles BEFORE the producer's first candle would seed the
+        # directional-change state elsewhere; the offline path must ignore them.
+        data = candles()
+        data.to_feather(self.manager._get_feather_path(PAIR, '5m'))
+        early = pd.DataFrame({
+            'date': data.date.iloc[0] - pd.to_timedelta([10, 5], unit='min'),
+            'open': [300., 50.], 'high': [300., 50.], 'low': [300., 50.], 'close': [300., 50.], 'volume': 1.,
+        })
+        native = pd.concat([early, data], ignore_index=True)
+        expected = self.manager.compute_signals(data, *PARAMS)
+        self.strategy.dp = SimpleNamespace(runmode=RunMode.BACKTEST)
+        with patch.object(self.manager, 'compute_signals', wraps=self.manager.compute_signals) as detector:
+            out = self.strategy.populate_indicators(native, {'pair': PAIR})
+        # (This tiny fixture re-syncs before X..C, so check the detector's input
+        # directly; on real candles a wrong origin shifts signals for weeks.)
+        self.assertEqual(detector.call_args.args[0]['date'].iloc[0], data.date.iloc[0])
+        np.testing.assert_array_equal(out.signal.iloc[2:], expected)
+        self.assertFalse(out.data_ok.iloc[:2].any())
+        self.assertTrue(out.data_ok.iloc[2:].all())
+
+    def test_offline_without_custom_history_warns(self):
+        self.strategy.dp = SimpleNamespace(runmode=RunMode.BACKTEST)
+        with self.assertLogs(strategy_module.logger, 'WARNING') as logs:
+            self.strategy.populate_indicators(candles(), {'pair': PAIR})
+        self.assertIn('no custom history', ' '.join(logs.output))
+
+    def test_live_decision_ledger(self):
+        data = candles().iloc[:6].copy()
+        ledger = self.strategy.ledger_path
+
+        def run(signal):
+            with patch.object(self.strategy, '_load_signals', return_value=(data.assign(signal=signal), True)):
+                out = self.strategy.populate_indicators(data, {'pair': PAIR})
+            self.strategy.populate_exit_trend(self.strategy.populate_entry_trend(out, {}), {'pair': PAIR})
+
+        run(1)
+        run(1)  # same candle, same decision: no new row
+        run(0)  # same candle, decision changed: recorded
+        rows = pd.read_csv(ledger)
+        self.assertEqual(list(rows.columns), self.strategy.LEDGER_FIELDS)
+        self.assertEqual(rows.enter_long.tolist(), [1, 0])
+        self.assertEqual(rows.exit_long.tolist(), [0, 1])
+        self.assertTrue((pd.to_datetime(rows.candle_date) == data.date.iloc[-1]).all())
+        ledger.unlink()
+        # A research replay (HARMONIC({}), no explicit path) must never write.
+        del self.strategy.ledger_path
+        run(1)
+        self.assertFalse(ledger.exists())
+        self.strategy.ledger_path = ledger
+        self.strategy.dp = SimpleNamespace(runmode=RunMode.BACKTEST)
+        out = self.strategy.populate_indicators(data, {'pair': PAIR})
+        self.strategy.populate_exit_trend(self.strategy.populate_entry_trend(out, {}), {'pair': PAIR})
+        self.assertFalse(ledger.exists())
 
     def test_invalid_ohlcv_rejected_in_shared_paths(self):
         for col, value in [('close', -1.), ('high', np.inf), ('high', 1.), ('volume', -1.)]:
@@ -197,11 +253,33 @@ class SignalPipelineTests(unittest.TestCase):
         revised.append([t, '100', '100', '100', '100', '1', t + 299999])
         with patch.object(self.manager, '_fetch_klines_chunk', side_effect=[revised, []]), \
                 patch.object(dm.time, 'sleep'), \
-                patch.object(self.manager, '_normalize_ohlcv', wraps=self.manager._normalize_ohlcv) as norm:
+                patch.object(self.manager, '_normalize_ohlcv', wraps=self.manager._normalize_ohlcv) as norm, \
+                self.assertLogs(dm.logger, 'INFO') as logs:
             out = self.manager.download_data(PAIR, '5m')
+        # Every revised stored candle is traced; the brand-new candle is not a repair.
+        self.assertEqual(sum('REPAIRED' in m for m in logs.output), 12)
         self.assertEqual(len(out), n + 1)
         np.testing.assert_allclose(out.close.iloc[-13:-1], data.close.iloc[-12:] * 1.01)
         self.assertLessEqual(max(len(c.args[0]) for c in norm.call_args_list), n + 13)
+
+    def test_old_zero_volume_placeholders_are_redownloaded(self):
+        # Binance revised placeholder candles hours later (2026-10-27): a zero-volume
+        # run older than the 12-candle tail is re-fetched from one candle before it,
+        # but only inside the look-back window.
+        n = 3000
+        close = 100 + np.sin(np.arange(n) / 50.)
+        data = pd.DataFrame({
+            'date': pd.date_range('2026-01-01', periods=n, freq='5min', tz='UTC'),
+            'open': close, 'high': close, 'low': close, 'close': close, 'volume': 1.,
+        })
+        data.loc[2000:2005, 'volume'] = 0.
+        data.to_feather(self.manager._get_feather_path(PAIR, '5m'))
+        ms = lambda i: int(data.date.iloc[i].timestamp() * 1000)
+        for window, first in [(self.manager.PLACEHOLDER_REPAIR_CANDLES, 1999), (500, n - 12)]:
+            with patch.object(self.manager, 'PLACEHOLDER_REPAIR_CANDLES', window), \
+                    patch.object(self.manager, '_fetch_klines_chunk', return_value=[]) as fetch:
+                self.manager.download_data(PAIR, '5m')
+            self.assertEqual(fetch.call_args_list[0].args[2], ms(first))
 
     def test_cache_rechecks_freshness_and_file_revision(self):
         data = candles().assign(signal=1)

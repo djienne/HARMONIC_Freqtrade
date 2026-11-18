@@ -68,7 +68,7 @@ writer against the same custom data directory.
 
 ```sh
 docker compose run --rm --no-deps --entrypoint python freqtrade -B -m unittest discover -s user_data/tests -v
-docker compose run --rm --no-deps --entrypoint freqtrade freqtrade backtesting --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20251127 --cache none
+docker compose run --rm --no-deps --entrypoint freqtrade freqtrade backtesting --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101- --cache none --export trades
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade lookahead-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20240101-20251127
 docker compose run --rm --no-deps --entrypoint freqtrade freqtrade recursive-analysis --strategy HARMONIC --config user_data/config.json --timeframe 5m --timerange 20250101-20250401
 ```
@@ -81,6 +81,50 @@ throwaway dry-run copy (fresh database, separate port) force-entered BTC: a 5x
 long with a stake of about 500 filled at once, and the live exit signal closed
 it 41 s later (`exit_signal`). The production database had never held a trade
 because the pre-fix pipeline published each long one candle after its start.
+
+### Backtest ≡ live (2026-11-18)
+
+Research scripts run in Docker with `research/` mounted. From Git Bash, prefix
+`MSYS_NO_PATHCONV=1` and mount `"$(pwd -W)/research:/freqtrade/research"`.
+
+- `research/check_backtest_parity.py --start 2025-01-01` (after the backtest above,
+  with native data downloaded to now) compares three things. It checks native against
+  producer OHLC, then the strategy's backtest signals against the live file, then the
+  exported trades against the live signals. Over 2025-01-01..2026-11-18 it found
+  **0 differing signal rows** across 9 BTC and 15 ETH long starts. All 24 trades opened
+  on the candle after a live +1, and all signal exits followed a live ≤ 0. No live start
+  was missed.
+- That input check found 7 candles per pair, 2026-10-27 00:00–00:30, where the producer
+  still held Binance's flat zero-volume placeholders. Binance revised them more than an
+  hour later, past the 12-candle tail repair. Signals were unaffected. The producer now
+  re-downloads from one candle before any zero-volume candle within 30 days.
+  Repaired candles are logged as `REPAIRED <pair> <date> old=… new=…`.
+- **Warmup is part of the model.** The directional-change state starts at bar 0, so the
+  start bar matters. A 500-candle warmup missed 4 of 5 recent long starts. Of 60 random
+  truncated starts, 12 differed for up to 28 days. Offline runs therefore start the
+  detector at the producer's first candle (2020-01-01) and log that origin. Native
+  candles before it get no signal. Without custom history, a WARNING is logged.
+- **Latency.** Live signals are published a median of 41 s (BTC) / 75 s (ETH) after
+  the candle closes, while backtests fill at the open. `research/entry_latency_cost.py`
+  brackets the live fill with 1m closes at +1, +2 and +3 min across all historical long
+  starts:
+
+  | | +1 min mean (median) | +2 min mean | mean \|cost\| | backtest mean move |
+  |---|---|---|---|---|
+  | BTC (38 starts) | +0.13% (+0.12%) | +0.14% | 0.40% | +2.56% (9 trades) |
+  | ETH (70 starts) | −0.04% (−0.03%) | −0.24% | 0.36–0.64% | +1.09% (15 trades) |
+
+  Positive means a worse fill for a long. There is no significant systematic bias
+  (BTC is about 1.6 SE from zero). Per-trade noise is small next to BTC's edge but
+  roughly half of ETH's.
+- **Live decision ledger.** The trader appends its newest-candle decision to
+  `user_data/logs/live_decisions.csv`. It writes a row on first sight and again on any
+  same-candle change, but only in a real trade run. Each row has the candle, the
+  sighting time, the file revision, the fingerprint, signal, data_ok, the flags and OHLC.
+  `research/compare_live_ledger.py [--recompute]` diffs those decisions against the
+  producer's final signals and links any mismatch to logged repairs. It also reports
+  missed decisions and latency. The first natural live long is the end-to-end proof:
+  its trade, ledger row and backtest trade must share the entry candle.
 
 Only live and dry-run read the producer's signal files. Every other run mode,
 including Freqtrade's `lookahead-analysis` and `recursive-analysis`, runs the
@@ -109,8 +153,9 @@ both services together.
 
 The tests check prefix causality, invariance to price units, flat/empty limits,
 missing-candle recovery, parameter changes, cache expiry and cached failures,
-download failures, tail repair, run-mode routing, date resolution and invalid
-OHLCV rejection. A passing test is not evidence of profitability.
+download failures, tail repair and its REPAIRED log, zero-volume placeholder
+re-download, the offline detector origin, the live decision ledger, run-mode
+routing, date resolution and invalid OHLCV rejection. A passing test is not evidence of profitability.
 Native backtests with only five-minute candles do not resolve intrabar order
 execution; use finer detail candles and out-of-sample periods for performance
 research, including fees, funding, slippage and parameter sensitivity.

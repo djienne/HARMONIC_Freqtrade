@@ -129,9 +129,19 @@ class HARMONIC(IStrategy):
         if os.path.exists(path) and not data.empty:
             history = pd.read_feather(path, columns=columns)
             history['date'] = pd.to_datetime(history['date'], utc=True)
+            if not history.empty:
+                # The directional-change state is seeded at bar 0, and a different
+                # start shifts signals for up to ~4 weeks. Start where the live
+                # producer starts; earlier native candles get no signal (data_ok=False).
+                data = data.loc[data['date'] >= history['date'].min()]
             history = history.loc[history['date'] < data['date'].min()]
             data = pd.concat([history, data], ignore_index=True)
+        else:
+            logger.warning(f"{pair}: no custom history; detector starts at the native input, "
+                           "so signals can differ from live for weeks after the start.")
         data = data_manager._normalize_ohlcv(data, self.timeframe, drop_unclosed=False)
+        if not data.empty:
+            logger.info(f"{pair}: offline detector origin {data['date'].iloc[0]}, {len(data)} candles.")
         data['signal'] = data_manager.compute_signals(
             data, self.sigma.value, self.err_thresh.value, self.kept_patterns.value
         )
@@ -196,7 +206,46 @@ class HARMONIC(IStrategy):
         # on the same candle. On degraded data we hold rather than exit.
         dataframe['exit_long'] = 0
         dataframe.loc[(dataframe['signal'] <= 0) & dataframe['data_ok'], 'exit_long'] = 1
+        if getattr(getattr(self, 'dp', None), 'runmode', None) in TRADE_MODES:
+            self._record_decision(dataframe, metadata.get('pair', '?'))
         return dataframe
+
+    LEDGER_FIELDS = ['candle_date', 'pair', 'seen_at_utc', 'file_mtime_ns', 'fingerprint', 'signal',
+                     'data_ok', 'enter_long', 'exit_long', 'open', 'high', 'low', 'close']
+
+    def _record_decision(self, dataframe: pd.DataFrame, pair: str) -> None:
+        """Append what the trader saw on its newest candle, so live can be replayed
+        against backtests. Rows only on first sight and on same-candle change.
+        Ceiling: ~210k rows/yr for two pairs (~25 MB); rotate if that ever matters."""
+        try:
+            # Only a real trader run (freqtrade sets user_data_dir) or an explicit
+            # path writes; research replays build HARMONIC({}) with re-dated candles.
+            path = getattr(self, 'ledger_path', None)
+            if path is None and self.config.get('user_data_dir'):
+                path = Path(self.config['user_data_dir']) / 'logs' / 'live_decisions.csv'
+            if path is None or dataframe.empty:
+                return
+            path = Path(path)
+            last = dataframe.iloc[-1]
+            params = (self.sigma.value, self.err_thresh.value, self.kept_patterns.value)
+            cached = getattr(self, '_signal_cache', {}).get(pair)
+            values = (str(last['date']), int(last['signal']), bool(last['data_ok']),
+                      int(last['enter_long']), int(last['exit_long']))
+            seen = getattr(self, '_ledger_seen', {})
+            self._ledger_seen = seen
+            if seen.get(pair) == values:
+                return
+            seen[pair] = values
+            new_file = not path.exists()
+            row = [values[0], pair, pd.Timestamp.now(tz='UTC').isoformat(),
+                   cached[0][0][0] if cached else '', data_manager._fingerprint(*params),
+                   *values[1:], last['open'], last['high'], last['low'], last['close']]
+            with open(path, 'a', encoding='utf-8') as f:
+                if new_file:
+                    f.write(','.join(self.LEDGER_FIELDS) + '\n')
+                f.write(','.join(map(str, row)) + '\n')
+        except Exception as e:  # never let bookkeeping block trading
+            logger.warning(f"{pair}: could not record decision: {e}")
 
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: Optional[str], side: str,

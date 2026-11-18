@@ -280,6 +280,7 @@ class DataManager:
     SIGNAL_VERSION = 3
 
     TAIL_REPAIR_CANDLES = 12
+    PLACEHOLDER_REPAIR_CANDLES = 30 * 288  # 30 days of 5m candles
     # Signal metadata travels inside the feather (Arrow schema metadata), so one
     # atomic file replace publishes data and metadata together: no write window.
     META_KEY = b'harmonic_signal_meta'
@@ -587,8 +588,9 @@ class DataManager:
                 )
                 existing_data = self._normalize_ohlcv(existing_data, timeframe, drop_unclosed=True)
                 if not existing_data.empty:
-                    repair_count = min(self.TAIL_REPAIR_CANDLES, len(existing_data))
-                    repair_start = len(existing_data) - repair_count
+                    repair_start = min(len(existing_data) - min(self.TAIL_REPAIR_CANDLES, len(existing_data)),
+                                       self._placeholder_repair_start(existing_data))
+                    repair_count = len(existing_data) - repair_start
                     repair_start_ts = existing_data['date'].iloc[repair_start]
                     since = int(repair_start_ts.timestamp() * 1000)
                     current_data = existing_data.iloc[:repair_start].copy()
@@ -673,8 +675,46 @@ class DataManager:
         if current_data is None:
             current_data = existing_data
         elif existing_data is not None:
+            self._log_repairs(pair, existing_data.iloc[prefix_len:], current_data.iloc[prefix_len:])
             current_data = pd.concat([existing_data, current_data.iloc[prefix_len:]], ignore_index=True)
         return self._normalize_ohlcv(current_data, timeframe)
+
+    def _placeholder_repair_start(self, existing):
+        """Index to re-download from so recent zero-volume candles get revisited.
+
+        Binance served closed, flat, zero-volume placeholders for both pairs on
+        2026-10-27 00:05-00:30 (and a truncated 00:00 candle) and revised them
+        more than an hour later, past the 12-candle tail repair. Re-download from
+        one candle before the first zero-volume candle in the window.
+        Ceiling: genuine zero-volume maintenance candles (7 runs since 2020,
+        identical in freqtrade's data) make each cycle re-download up to 30 days
+        (~6 requests per pair) until they age out. Non-zero revisions older than
+        12 candles are not caught; the REPAIRED log and
+        research/check_backtest_parity.py are the detectors for those.
+        """
+        volume = existing['volume'].to_numpy()[-self.PLACEHOLDER_REPAIR_CANDLES:]
+        zero = np.flatnonzero(volume == 0)
+        if not zero.size:
+            return len(existing)
+        return max(0, len(existing) - len(volume) + int(zero[0]) - 1)
+
+    @staticmethod
+    def _log_repairs(pair, old, new):
+        """Log stored candles whose prices changed on re-download. Such a repair can
+        change a signal the trader already acted on, so live replays need this trace."""
+        cols = ['open', 'high', 'low', 'close']
+        try:
+            key = lambda df: pd.to_datetime(df['date'], utc=True).dt.strftime('%Y-%m-%dT%H:%M')
+            old = old[cols].set_axis(key(old).to_numpy())
+            new = new[cols].set_axis(key(new).to_numpy())
+            new = new[~new.index.duplicated(keep='last')]
+            both = old.join(new, how='inner', rsuffix='_new')
+            for date, r in both.iterrows():
+                o, n = tuple(r[cols]), tuple(r[[c + '_new' for c in cols]])
+                if o != n:
+                    logger.info(f"REPAIRED {pair} {date} old={o} new={n}")
+        except Exception as e:  # diagnostics only; never block publishing
+            logger.warning(f"Could not compare repaired candles for {pair}: {e}")
 
     def ensure_data_up_to_date(self, pair):
         filepath = self._get_feather_path(pair, self.timeframe)

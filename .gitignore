@@ -11,6 +11,7 @@ env/
 # Freqtrade runtime logs
 user_data/logs/*.log
 user_data/logs/*.log.*
+user_data/logs/live_decisions.csv
 
 # SQLite trade databases + WAL/shared-memory sidecars (runtime state, not source)
 *.sqlite
